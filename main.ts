@@ -1,134 +1,161 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
-
-// Remember to rename these classes and interfaces!
+import { App, Plugin, Notice, Setting, PluginSettingTab, TFile } from 'obsidian';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 interface MyPluginSettings {
-	mySetting: string;
+  apiKey: string;
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
+  apiKey: '',
+};
 
 export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+  settings: MyPluginSettings;
 
-	async onload() {
-		await this.loadSettings();
+  async onload() {
+    await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
+    // Add setting tab for API key
+    this.addSettingTab(new SettingTab(this.app, this));
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
+    // Add command to transcribe linked audio files
+    this.addCommand({
+      id: 'transcribe-audio',
+      name: 'Transcribe linked audio files',
+      callback: () => this.transcribeAudio(),
+    });
+  }
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
+  async transcribeAudio() {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) {
+      new Notice('No active file');
+      return;
+    }
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
+    if (!this.settings.apiKey) {
+      new Notice('API key is not set. Please set it in the plugin settings.');
+      return;
+    }
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+    const content = await this.app.vault.read(activeFile);
+    const audioLinks = this.extractAudioLinks(content);
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
+    for (const link of audioLinks) {
+      const audioFile = await this.findAudioFile(link);
+      if (audioFile && audioFile instanceof TFile) {
+        const audioContent = await this.app.vault.readBinary(audioFile);
+        const transcript = await this.getTranscript(audioContent, audioFile.extension);
+        await this.appendTranscript(activeFile, link, transcript);
+      } else {
+        new Notice(`Audio file not found: ${link}`);
+      }
+    }
+  }
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
+  extractAudioLinks(content: string): string[] {
+    const regex = /\[\[([^\]]+)\]\]/g;
+    const links: string[] = [];
+    let match;
+    while ((match = regex.exec(content)) !== null) {
+      const filename = match[1];
+      if (filename.toLowerCase().endsWith('.m4a')) {
+        links.push(filename);
+      }
+    }
+    return links;
+  }
 
-	onunload() {
+  async findAudioFile(link: string): Promise<TFile | null> {
+    // Try direct path first
+    let file = this.app.vault.getAbstractFileByPath(link);
+    if (file && file instanceof TFile) {
+      return file;
+    }
 
-	}
+    // Fallback: search vault recursively by basename
+    const basename = link.split('/').pop() || link; // Get filename without path
+    file = this.findFileByName(basename);
+    if (file) {
+      new Notice(`Found ${basename} at ${file.path}`);
+      return file;
+    }
 
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
+    return null;
+  }
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+  findFileByName(filename: string): TFile | null {
+    const files = this.app.vault.getFiles();
+    for (const file of files) {
+      if (file.name.toLowerCase() === filename.toLowerCase() && file instanceof TFile) {
+        return file; // Return first match
+      }
+    }
+    return null;
+  }
+
+  async getTranscript(audioData: Uint8Array, extension: string): Promise<string> {
+    try {
+      const genAI = new GoogleGenerativeAI(this.settings.apiKey); // Removed apiKey option for simplicity
+      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' }); // Use a model that supports audio
+      const audioPart = {
+        inlineData: {
+          mimeType: `audio/${extension === 'm4a' ? 'mp4' : extension}`,
+          data: Buffer.from(audioData).toString('base64'),
+        },
+      };
+      const result = await model.generateContent([
+        { text: 'Please give me the transcript of this in paragraph format without timestamps and also break up the paragraphs' },
+        audioPart,
+      ]);
+      return result.response.text();
+    } catch (error) {
+      new Notice(`Transcription error: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async appendTranscript(file: TFile, link: string, transcript: string) {
+    let content = await this.app.vault.read(file);
+    const basename = link.split('/').pop() || link; // Use basename for readability
+    content += `\n\n## Transcript for ${basename}\n\n${transcript}`;
+    await this.app.vault.modify(file, content);
+    new Notice(`Transcript added for ${basename}`);
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class SettingTab extends PluginSettingTab {
+  plugin: MyPlugin;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+  constructor(app: App, plugin: MyPlugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl('h2', { text: 'Audio Transcription Settings' });
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const {containerEl} = this;
-
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+    new Setting(containerEl)
+      .setName('Gemini API Key')
+      .setDesc('Enter your Gemini API key from Google AI Studio')
+      .addText((text) =>
+        text
+          .setPlaceholder('Enter API key')
+          .setValue(this.plugin.settings.apiKey)
+          .onChange(async (value) => {
+            this.plugin.settings.apiKey = value;
+            await this.plugin.saveSettings();
+          })
+      );
+  }
 }
