@@ -106,7 +106,7 @@ export default class MyPlugin extends Plugin {
         },
       };
       const result = await model.generateContent([
-        { text: 'Return the transcript of this file without timestamps and separated into paragraphs' },
+        { text: 'Return the transcript of this file without timestamps and separated into neat paragraphs' },
         audioPart,
       ]);
       return result.response.text();
