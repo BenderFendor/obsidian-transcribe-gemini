@@ -96,8 +96,9 @@ export default class MyPlugin extends Plugin {
 
   async getTranscript(audioData: Uint8Array, extension: string): Promise<string> {
     try {
+      new Notice('Transcribing audio...'); // Notify user of transcription start
       const genAI = new GoogleGenerativeAI(this.settings.apiKey); // Removed apiKey option for simplicity
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' }); // Use a model that supports audio
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' }); // Use a model that supports audio
       const audioPart = {
         inlineData: {
           mimeType: `audio/${extension === 'm4a' ? 'mp4' : extension}`,
