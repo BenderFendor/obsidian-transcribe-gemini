@@ -45,7 +45,7 @@ export default class MyPlugin extends Plugin {
       const audioFile = await this.findAudioFile(link);
       if (audioFile && audioFile instanceof TFile) {
         const audioContent = await this.app.vault.readBinary(audioFile);
-        const transcript = await this.getTranscript(audioContent, audioFile.extension);
+        const transcript = await this.getTranscript(new Uint8Array(audioContent), audioFile.extension);
         await this.appendTranscript(activeFile, link, transcript);
       } else {
         new Notice(`Audio file not found: ${link}`);
@@ -68,17 +68,17 @@ export default class MyPlugin extends Plugin {
 
   async findAudioFile(link: string): Promise<TFile | null> {
     // Try direct path first
-    let file = this.app.vault.getAbstractFileByPath(link);
-    if (file && file instanceof TFile) {
-      return file;
+    const abstractFile = this.app.vault.getAbstractFileByPath(link);
+    if (abstractFile instanceof TFile) {
+      return abstractFile;
     }
 
     // Fallback: search vault recursively by basename
     const basename = link.split('/').pop() || link; // Get filename without path
-    file = this.findFileByName(basename);
-    if (file) {
-      new Notice(`Found ${basename} at ${file.path}`);
-      return file;
+    const fileByName = this.findFileByName(basename);
+    if (fileByName) {
+      new Notice(`Found ${basename} at ${fileByName.path}`);
+      return fileByName;
     }
 
     return null;
@@ -99,10 +99,19 @@ export default class MyPlugin extends Plugin {
       new Notice('Transcribing audio...'); // Notify user of transcription start
       const genAI = new GoogleGenerativeAI(this.settings.apiKey); // Removed apiKey option for simplicity
       const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' }); // Use a model that supports audio
+
+      // Convert Uint8Array to a binary string
+      let binaryString = '';
+      for (let i = 0; i < audioData.byteLength; i++) {
+        binaryString += String.fromCharCode(audioData[i]);
+      }
+      // Encode the binary string to base64
+      const base64AudioData = btoa(binaryString);
+
       const audioPart = {
         inlineData: {
           mimeType: `audio/${extension === 'm4a' ? 'mp4' : extension}`,
-          data: Buffer.from(audioData).toString('base64'),
+          data: base64AudioData, // Use the new base64 string
         },
       };
       const result = await model.generateContent([

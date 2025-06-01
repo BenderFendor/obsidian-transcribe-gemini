@@ -1,6 +1,5 @@
 import esbuild from "esbuild";
 import process from "process";
-import builtins from "builtin-modules";
 
 const banner =
 `/*
@@ -19,8 +18,7 @@ const context = await esbuild.context({
 	bundle: true,
 	external: [
 		"obsidian",
-		"electron",
-		"@codemirror/autocomplete",
+		 "@codemirror/autocomplete",
 		"@codemirror/collab",
 		"@codemirror/commands",
 		"@codemirror/language",
@@ -30,8 +28,8 @@ const context = await esbuild.context({
 		"@codemirror/view",
 		"@lezer/common",
 		"@lezer/highlight",
-		"@lezer/lr",
-		...builtins],
+		"@lezer/lr"
+	],
 	format: "cjs",
 	target: "es2018",
 	logLevel: "info",
