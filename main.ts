@@ -54,7 +54,7 @@ export default class MyPlugin extends Plugin {
   }
 
   extractAudioLinks(content: string): string[] {
-    const regex = /\[\[([^\]]+)\]\]/g;
+    const regex = /!?\[\[([^\]]+)\]\]/g; // Updated regex to find [[link]] or ![[link]]
     const links: string[] = [];
     let match;
     while ((match = regex.exec(content)) !== null) {
@@ -125,11 +125,74 @@ export default class MyPlugin extends Plugin {
     }
   }
 
+  async generateDescriptiveTitle(transcript: string): Promise<string> {
+    if (!this.settings.apiKey) {
+      console.warn('API key not set, cannot generate descriptive title.');
+      return ''; // Return empty if no API key
+    }
+    if (!transcript || transcript.trim().length === 0) {
+      return ''; // Return empty if no transcript
+    }
+
+    try {
+      new Notice('Generating descriptive title for transcript...', 3000); // Short notice
+      const genAI = new GoogleGenerativeAI(this.settings.apiKey);
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' }); // Or your preferred model for summarization
+
+      // Prompt Gemini to create a short title.
+      // Sending only the beginning of the transcript to save tokens and time if it's very long.
+      const transcriptSnippet = transcript.length > 1500 ? transcript.substring(0, 1500) + "..." : transcript;
+      const prompt = `Based on the following transcript, provide a very short, descriptive title (around 3-7 words) suitable for a heading. Do not use quotes in the title. Transcript snippet:\n\n"${transcriptSnippet}"`;
+
+      const result = await model.generateContent(prompt);
+      let title = result.response.text().trim();
+      
+      // Basic cleanup: remove potential quotes and leading/trailing "Title:" or similar artifacts.
+      title = title.replace(/^Title:\s*/i, '').replace(/["']/g, '');
+      
+      return title;
+    } catch (error) {
+      new Notice(`Error generating descriptive title: ${error.message}`, 5000);
+      console.error("Error generating descriptive title:", error);
+      return ''; // Fallback to empty on error
+    }
+  }
+
   async appendTranscript(file: TFile, link: string, transcript: string) {
-    let content = await this.app.vault.read(file);
-    const basename = link.split('/').pop() || link; // Use basename for readability
-    content += `\n\n## Transcript for ${basename}\n\n${transcript}`;
-    await this.app.vault.modify(file, content);
+    let currentFileContent = await this.app.vault.read(file);
+    const basename = link.split('/').pop() || link; // Original filename for the audio link embed in the new section
+
+    // Generate the descriptive title from the transcript content
+    const descriptiveTitle = await this.generateDescriptiveTitle(transcript);
+
+    // Determine the header text
+    const headerText = descriptiveTitle ? `Transcript about ${descriptiveTitle}` : `Transcript for ${basename}`;
+    
+    // Format for the audio file link (as an embed) in the new transcript section
+    const audioFileEmbedInNewSection = `![[${basename}]]`;
+
+    // Construct the new transcript section to be appended
+    const newTranscriptSection = `\n\n# ${headerText}\n${audioFileEmbedInNewSection}\n\n${transcript}`;
+    
+    // Define the markdown for the original link to be removed.
+    // 'link' is the exact string extracted from between the brackets by extractAudioLinks.
+    const originalNonEmbedLinkMarkdown = `[[${link}]]`;
+    const originalEmbedLinkMarkdown = `![[${link}]]`;
+
+    // Remove the original link from the current file content.
+    // Try removing the embed version first, then the non-embed version.
+    // This replaces only the first occurrence found during this specific call.
+    let contentAfterRemoval = currentFileContent;
+    if (contentAfterRemoval.includes(originalEmbedLinkMarkdown)) {
+        contentAfterRemoval = contentAfterRemoval.replace(originalEmbedLinkMarkdown, '');
+    } else if (contentAfterRemoval.includes(originalNonEmbedLinkMarkdown)) {
+        contentAfterRemoval = contentAfterRemoval.replace(originalNonEmbedLinkMarkdown, '');
+    }
+    
+    // Append the new transcript section to the modified content
+    const finalContent = contentAfterRemoval + newTranscriptSection;
+    
+    await this.app.vault.modify(file, finalContent);
     new Notice(`Transcript added for ${basename}`);
   }
 
