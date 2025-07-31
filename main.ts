@@ -57,11 +57,19 @@ export default class MyPlugin extends Plugin {
     const regex = /!?\[\[([^\]]+)\]\]/g; // Updated regex to find [[link]] or ![[link]]
     const links: string[] = [];
     let match;
+
+	const audioExtensions = ['.m4a', '.mp3', '.mp4']; // Supported audio file extensions
+
     while ((match = regex.exec(content)) !== null) {
       const filename = match[1];
-      if (filename.toLowerCase().endsWith('.m4a')) {
-        links.push(filename);
-      }
+
+
+	  for (const ext of audioExtensions) {
+		if (filename.toLowerCase().endsWith(ext)) {
+		  links.push(filename);
+		  break; // Stop checking other extensions once a match is found
+		}
+	  }
     }
     return links;
   }
@@ -98,7 +106,7 @@ export default class MyPlugin extends Plugin {
     try {
       new Notice('Transcribing audio...'); // Notify user of transcription start
       const genAI = new GoogleGenerativeAI(this.settings.apiKey); // Removed apiKey option for simplicity
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' }); // Use a model that supports audio
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' }); // Use a model that supports audio
 
       // Convert Uint8Array to a binary string
       let binaryString = '';
@@ -110,7 +118,7 @@ export default class MyPlugin extends Plugin {
 
       const audioPart = {
         inlineData: {
-          mimeType: `audio/${extension === 'm4a' ? 'mp4' : extension}`,
+          mimeType: `audio/${extension === 'm4a' ? 'mp4' : extension}`, // Use mp4 for m4a files
           data: base64AudioData, // Use the new base64 string
         },
       };
@@ -137,7 +145,7 @@ export default class MyPlugin extends Plugin {
     try {
       new Notice('Generating descriptive title for transcript...', 3000); // Short notice
       const genAI = new GoogleGenerativeAI(this.settings.apiKey);
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' }); // Or your preferred model for summarization
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' }); // Or your preferred model for summarization
 
       // Prompt Gemini to create a short title.
       // Sending only the beginning of the transcript to save tokens and time if it's very long.
