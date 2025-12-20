@@ -9,6 +9,8 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
   apiKey: '',
 };
 
+const GEMINI_MODEL_ID = 'gemini-3-flash-preview';
+
 export default class MyPlugin extends Plugin {
   settings: MyPluginSettings;
 
@@ -33,6 +35,8 @@ export default class MyPlugin extends Plugin {
       return;
     }
 
+    this.debug('Transcribe command started', { file: activeFile.path });
+
     if (!this.settings.apiKey) {
       new Notice('API key is not set. Please set it in the plugin settings.');
       return;
@@ -40,6 +44,7 @@ export default class MyPlugin extends Plugin {
 
     const content = await this.app.vault.read(activeFile);
     const audioLinks = this.extractAudioLinks(content);
+    this.debug('Audio links detected', { count: audioLinks.length });
 
     for (const link of audioLinks) {
       const audioFile = await this.findAudioFile(link);
@@ -106,7 +111,7 @@ export default class MyPlugin extends Plugin {
     try {
       new Notice('Transcribing audio...'); // Notify user of transcription start
       const genAI = new GoogleGenerativeAI(this.settings.apiKey); // Removed apiKey option for simplicity
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' }); // Use a model that supports audio
+      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL_ID }); // Use a model that supports audio
 
       // Convert Uint8Array to a binary string
       let binaryString = '';
@@ -122,11 +127,15 @@ export default class MyPlugin extends Plugin {
           data: base64AudioData, // Use the new base64 string
         },
       };
+
+      this.debug('Sending audio to Gemini', { model: GEMINI_MODEL_ID, mimeType: audioPart.inlineData.mimeType });
       const result = await model.generateContent([
         { text: 'Return the transcript of this file without timestamps and separated into neat paragraphs' },
         audioPart,
       ]);
-      return result.response.text();
+      const transcript = result.response.text();
+      this.debug('Transcript received', { length: transcript.length });
+      return transcript;
     } catch (error) {
       new Notice(`Transcription error: ${error.message}`);
       throw error;
@@ -145,7 +154,8 @@ export default class MyPlugin extends Plugin {
     try {
       new Notice('Generating descriptive title for transcript...', 3000); // Short notice
       const genAI = new GoogleGenerativeAI(this.settings.apiKey);
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' }); // Or your preferred model for summarization
+      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL_ID }); // Or your preferred model for summarization
+      this.debug('Generating title', { model: GEMINI_MODEL_ID, transcriptLength: transcript.length });
 
       // Prompt Gemini to create a short title.
       // Sending only the beginning of the transcript to save tokens and time if it's very long.
@@ -210,6 +220,14 @@ export default class MyPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  private debug(message: string, data?: unknown) {
+    if (data === undefined) {
+      console.debug(`[transcribe-gemini] ${message}`);
+      return;
+    }
+    console.debug(`[transcribe-gemini] ${message}`, data);
   }
 }
 
