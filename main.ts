@@ -9,7 +9,7 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
   apiKey: '',
 };
 
-const GEMINI_MODEL_ID = 'gemini-3-flash-preview';
+const GEMINI_MODEL_ID = 'gemini-3.1-flash-lite-preview';
 
 export default class MyPlugin extends Plugin {
   settings: MyPluginSettings;
@@ -130,7 +130,7 @@ export default class MyPlugin extends Plugin {
 
       this.debug('Sending audio to Gemini', { model: GEMINI_MODEL_ID, mimeType: audioPart.inlineData.mimeType });
       const result = await model.generateContent([
-        { text: 'Return the transcript of this file without timestamps and separated into neat paragraphs' },
+        { text: 'Return the transcript of this file without timestamps and separated into neat paragraphs, Return only the transcript itself' },
         audioPart,
       ]);
       const transcript = result.response.text();
