@@ -9,7 +9,7 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
   apiKey: '',
 };
 
-const GEMINI_MODEL_ID = 'gemini-3.1-flash-lite-preview';
+const GEMINI_MODEL_ID = 'gemini-3.5-flash';
 
 export default class MyPlugin extends Plugin {
   settings: MyPluginSettings;

@@ -1,6 +1,6 @@
 # Transcribe Gemini Plugin
 
-Transcribe Gemini is an Obsidian plugin that automatically transcribes audio files linked within your notes. Powered by Google’s Gemini generative AI model, this plugin converts supported audio files (currently `.m4a`) into text transcripts and appends them to your notes. It uses the `gemini-3-flash-preview` model.
+Transcribe Gemini is an Obsidian plugin that automatically transcribes audio files linked within your notes. Powered by Google’s Gemini generative AI model, this plugin converts supported audio files (currently `.m4a`) into text transcripts and appends them to your notes. It uses the `gemini-3.5-flash` model.
 
 ## Key Features
 
