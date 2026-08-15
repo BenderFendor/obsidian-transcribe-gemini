@@ -1,5 +1,5 @@
 import { App, Plugin, Notice, Setting, PluginSettingTab, TFile } from 'obsidian';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
 interface MyPluginSettings {
   apiKey: string;
@@ -9,7 +9,7 @@ const DEFAULT_SETTINGS: MyPluginSettings = {
   apiKey: '',
 };
 
-const GEMINI_MODEL_ID = 'gemini-3.5-flash';
+const GEMINI_MODEL_ID = 'gemini-3.6-flash';
 
 export default class MyPlugin extends Plugin {
   settings: MyPluginSettings;
@@ -110,30 +110,29 @@ export default class MyPlugin extends Plugin {
   async getTranscript(audioData: Uint8Array, extension: string): Promise<string> {
     try {
       new Notice('Transcribing audio...'); // Notify user of transcription start
-      const genAI = new GoogleGenerativeAI(this.settings.apiKey); // Removed apiKey option for simplicity
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL_ID }); // Use a model that supports audio
-
-      // Convert Uint8Array to a binary string
-      let binaryString = '';
-      for (let i = 0; i < audioData.byteLength; i++) {
-        binaryString += String.fromCharCode(audioData[i]);
-      }
-      // Encode the binary string to base64
-      const base64AudioData = btoa(binaryString);
+      const ai = new GoogleGenAI({ apiKey: this.settings.apiKey });
 
       const audioPart = {
         inlineData: {
           mimeType: `audio/${extension === 'm4a' ? 'mp4' : extension}`, // Use mp4 for m4a files
-          data: base64AudioData, // Use the new base64 string
+          data: uint8ArrayToBase64(audioData),
         },
       };
 
       this.debug('Sending audio to Gemini', { model: GEMINI_MODEL_ID, mimeType: audioPart.inlineData.mimeType });
-      const result = await model.generateContent([
-        { text: 'Return the transcript of this file without timestamps and separated into neat paragraphs, Return only the transcript itself' },
-        audioPart,
-      ]);
-      const transcript = result.response.text();
+      const result = await ai.models.generateContent({
+        model: GEMINI_MODEL_ID,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'Return the transcript of this file without timestamps and separated into neat paragraphs, Return only the transcript itself' },
+              audioPart,
+            ],
+          },
+        ],
+      });
+      const transcript = result.text ?? '';
       this.debug('Transcript received', { length: transcript.length });
       return transcript;
     } catch (error) {
@@ -153,8 +152,7 @@ export default class MyPlugin extends Plugin {
 
     try {
       new Notice('Generating descriptive title for transcript...', 3000); // Short notice
-      const genAI = new GoogleGenerativeAI(this.settings.apiKey);
-      const model = genAI.getGenerativeModel({ model: GEMINI_MODEL_ID }); // Or your preferred model for summarization
+      const ai = new GoogleGenAI({ apiKey: this.settings.apiKey });
       this.debug('Generating title', { model: GEMINI_MODEL_ID, transcriptLength: transcript.length });
 
       // Prompt Gemini to create a short title.
@@ -162,8 +160,11 @@ export default class MyPlugin extends Plugin {
       const transcriptSnippet = transcript.length > 1500 ? transcript.substring(0, 1500) + "..." : transcript;
       const prompt = `Based on the following transcript, provide a very short, descriptive title (around 3-7 words) suitable for a heading. Do not use quotes in the title. Transcript snippet:\n\n"${transcriptSnippet}"`;
 
-      const result = await model.generateContent(prompt);
-      let title = result.response.text().trim();
+      const result = await ai.models.generateContent({
+        model: GEMINI_MODEL_ID,
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      });
+      let title = (result.text ?? '').trim();
       
       // Basic cleanup: remove potential quotes and leading/trailing "Title:" or similar artifacts.
       title = title.replace(/^Title:\s*/i, '').replace(/["']/g, '');
@@ -229,6 +230,20 @@ export default class MyPlugin extends Plugin {
     }
     console.debug(`[transcribe-gemini] ${message}`, data);
   }
+}
+
+/**
+ * Convert a Uint8Array to a base64 string in chunks.
+ * Chunking avoids call-stack overflow and is much faster than
+ * concatenating one character at a time for large audio files.
+ */
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
 }
 
 class SettingTab extends PluginSettingTab {
