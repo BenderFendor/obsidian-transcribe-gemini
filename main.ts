@@ -47,7 +47,7 @@ export default class MyPlugin extends Plugin {
     this.debug('Audio links detected', { count: audioLinks.length });
 
     for (const link of audioLinks) {
-      const audioFile = await this.findAudioFile(link);
+      const audioFile = await this.findAudioFile(link, activeFile);
       if (audioFile && audioFile instanceof TFile) {
         const audioContent = await this.app.vault.readBinary(audioFile);
         const transcript = await this.getTranscript(new Uint8Array(audioContent), audioFile.extension);
@@ -79,7 +79,7 @@ export default class MyPlugin extends Plugin {
     return links;
   }
 
-  async findAudioFile(link: string): Promise<TFile | null> {
+  async findAudioFile(link: string, activeFile: TFile | null): Promise<TFile | null> {
     // Try direct path first
     const abstractFile = this.app.vault.getAbstractFileByPath(link);
     if (abstractFile instanceof TFile) {
@@ -88,23 +88,63 @@ export default class MyPlugin extends Plugin {
 
     // Fallback: search vault recursively by basename
     const basename = link.split('/').pop() || link; // Get filename without path
-    const fileByName = this.findFileByName(basename);
-    if (fileByName) {
-      new Notice(`Found ${basename} at ${fileByName.path}`);
-      return fileByName;
+    const candidates = this.findFilesByName(basename);
+    if (candidates.length === 0) {
+      return null;
     }
 
-    return null;
-  }
-
-  findFileByName(filename: string): TFile | null {
-    const files = this.app.vault.getFiles();
-    for (const file of files) {
-      if (file.name.toLowerCase() === filename.toLowerCase() && file instanceof TFile) {
-        return file; // Return first match
+    // Prefer a file in the same folder as the active note, matching how
+    // Obsidian resolves [[links]] relative to the note.
+    if (activeFile && activeFile.parent) {
+      const sameFolder = candidates.find((file) => file.parent?.path === activeFile.parent?.path);
+      if (sameFolder) {
+        new Notice(`Found ${basename} at ${sameFolder.path}`);
+        return sameFolder;
       }
     }
-    return null;
+
+    // When multiple files share a basename, skip candidates whose content
+    // does not match an audio container (corrupt/encrypted files). Sending
+    // non-audio bytes with an audio mime type makes the API reject the
+    // request with INVALID_ARGUMENT.
+    for (const candidate of candidates) {
+      if (await this.hasValidAudioHeader(candidate)) {
+        new Notice(`Found ${basename} at ${candidate.path}`);
+        return candidate;
+      }
+    }
+
+    // No candidate has a recognizable audio header; let the API decide.
+    new Notice(`Found ${basename} at ${candidates[0].path}`);
+    return candidates[0];
+  }
+
+  findFilesByName(filename: string): TFile[] {
+    return this.app.vault.getFiles().filter(
+      (file) => file.name.toLowerCase() === filename.toLowerCase()
+    );
+  }
+
+  async hasValidAudioHeader(file: TFile): Promise<boolean> {
+    try {
+      const data = await this.app.vault.readBinary(file);
+      const bytes = new Uint8Array(data, 0, 12);
+      const header = String.fromCharCode(...bytes);
+      // MP4/M4A container: a size field followed by "ftyp" at offset 4
+      if (header.substring(4, 8) === 'ftyp') {
+        return true;
+      }
+      // MP3 with an ID3 tag, or a raw MPEG frame sync (0xFF 0xEx)
+      if (header.startsWith('ID3')) {
+        return true;
+      }
+      if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) {
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   async getTranscript(audioData: Uint8Array, extension: string): Promise<string> {
