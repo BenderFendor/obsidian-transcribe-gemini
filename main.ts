@@ -1,275 +1,291 @@
 import { App, Plugin, Notice, Setting, PluginSettingTab, TFile } from 'obsidian';
-import { GoogleGenAI } from '@google/genai';
+import { GeminiClient, StatusReporter } from './gemini';
 
 interface MyPluginSettings {
-  apiKey: string;
+	apiKey: string;
 }
 
 const DEFAULT_SETTINGS: MyPluginSettings = {
-  apiKey: '',
+	apiKey: '',
 };
 
-const GEMINI_MODEL_ID = 'gemini-3.6-flash';
+const NOTICE_INFO_MS = 8000;
+const NOTICE_FINAL_MS = 12000;
 
 export default class MyPlugin extends Plugin {
-  settings: MyPluginSettings;
+	settings: MyPluginSettings;
 
-  async onload() {
-    await this.loadSettings();
+	async onload() {
+		await this.loadSettings();
 
-    // Add setting tab for API key
-    this.addSettingTab(new SettingTab(this.app, this));
+		// Add setting tab for API key
+		this.addSettingTab(new SettingTab(this.app, this));
 
-    // Add command to transcribe linked audio files
-    this.addCommand({
-      id: 'transcribe-audio',
-      name: 'Transcribe linked audio files',
-      callback: () => this.transcribeAudio(),
-    });
-  }
+		// Add command to transcribe linked audio files
+		this.addCommand({
+			id: 'transcribe-audio',
+			name: 'Transcribe linked audio files',
+			callback: () => {
+				this.transcribeAudio().catch((error: unknown) => {
+					this.debug('Transcribe command crashed', { error });
+					new Notice(`Transcription aborted: ${error instanceof Error ? error.message : String(error)}`, NOTICE_FINAL_MS);
+				});
+			},
+		});
+	}
 
-  async transcribeAudio() {
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!activeFile) {
-      new Notice('No active file');
-      return;
-    }
-
-    this.debug('Transcribe command started', { file: activeFile.path });
-
-    if (!this.settings.apiKey) {
-      new Notice('API key is not set. Please set it in the plugin settings.');
-      return;
-    }
-
-    const content = await this.app.vault.read(activeFile);
-    const audioLinks = this.extractAudioLinks(content);
-    this.debug('Audio links detected', { count: audioLinks.length });
-
-    for (const link of audioLinks) {
-      const audioFile = await this.findAudioFile(link, activeFile);
-      if (audioFile && audioFile instanceof TFile) {
-        const audioContent = await this.app.vault.readBinary(audioFile);
-        const transcript = await this.getTranscript(new Uint8Array(audioContent), audioFile.extension);
-        await this.appendTranscript(activeFile, link, transcript);
-      } else {
-        new Notice(`Audio file not found: ${link}`);
-      }
-    }
-  }
-
-  extractAudioLinks(content: string): string[] {
-    const regex = /!?\[\[([^\]]+)\]\]/g; // Updated regex to find [[link]] or ![[link]]
-    const links: string[] = [];
-    let match;
-
-	const audioExtensions = ['.m4a', '.mp3', '.mp4']; // Supported audio file extensions
-
-    while ((match = regex.exec(content)) !== null) {
-      const filename = match[1];
-
-
-	  for (const ext of audioExtensions) {
-		if (filename.toLowerCase().endsWith(ext)) {
-		  links.push(filename);
-		  break; // Stop checking other extensions once a match is found
+	async transcribeAudio() {
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			new Notice('No active file');
+			return;
 		}
-	  }
-    }
-    return links;
-  }
 
-  async findAudioFile(link: string, activeFile: TFile | null): Promise<TFile | null> {
-    // Try direct path first
-    const abstractFile = this.app.vault.getAbstractFileByPath(link);
-    if (abstractFile instanceof TFile) {
-      return abstractFile;
-    }
+		this.debug('Transcribe command started', { file: activeFile.path });
 
-    // Fallback: search vault recursively by basename
-    const basename = link.split('/').pop() || link; // Get filename without path
-    const candidates = this.findFilesByName(basename);
-    if (candidates.length === 0) {
-      return null;
-    }
+		if (!this.settings.apiKey) {
+			new Notice('API key is not set. Please set it in the plugin settings.');
+			return;
+		}
 
-    // Prefer a file in the same folder as the active note, matching how
-    // Obsidian resolves [[links]] relative to the note.
-    if (activeFile && activeFile.parent) {
-      const sameFolder = candidates.find((file) => file.parent?.path === activeFile.parent?.path);
-      if (sameFolder) {
-        new Notice(`Found ${basename} at ${sameFolder.path}`);
-        return sameFolder;
-      }
-    }
+		const content = await this.app.vault.read(activeFile);
+		const audioLinks = this.extractAudioLinks(content);
+		this.debug('Audio links detected', { count: audioLinks.length });
 
-    // When multiple files share a basename, skip candidates whose content
-    // does not match an audio container (corrupt/encrypted files). Sending
-    // non-audio bytes with an audio mime type makes the API reject the
-    // request with INVALID_ARGUMENT.
-    for (const candidate of candidates) {
-      if (await this.hasValidAudioHeader(candidate)) {
-        new Notice(`Found ${basename} at ${candidate.path}`);
-        return candidate;
-      }
-    }
+		if (audioLinks.length === 0) {
+			new Notice('No linked audio files found in this note.');
+			return;
+		}
 
-    // No candidate has a recognizable audio header; let the API decide.
-    new Notice(`Found ${basename} at ${candidates[0].path}`);
-    return candidates[0];
-  }
+		const failures: string[] = [];
+		let transcribed = 0;
 
-  findFilesByName(filename: string): TFile[] {
-    return this.app.vault.getFiles().filter(
-      (file) => file.name.toLowerCase() === filename.toLowerCase()
-    );
-  }
+		for (const link of audioLinks) {
+			const basename = link.split('/').pop() || link;
+			try {
+				const audioFile = await this.findAudioFile(link, activeFile);
+				if (!(audioFile instanceof TFile)) {
+					throw new Error('not found in the vault');
+				}
+				const audioContent = await this.app.vault.readBinary(audioFile);
+				const transcript = await this.getTranscript(new Uint8Array(audioContent), audioFile.extension, basename);
+				await this.appendTranscript(activeFile, link, transcript);
+				transcribed++;
+			} catch (error) {
+				// One unusable file must not abandon the rest of the note.
+				const reason = error instanceof Error ? error.message : String(error);
+				this.debug('Transcription failed', { link, error });
+				console.error('[transcribe-gemini] failed', basename, error);
+				failures.push(`${basename} (${reason})`);
+				new Notice(`Failed: ${basename} — ${reason}`, NOTICE_FINAL_MS);
+			}
+		}
 
-  async hasValidAudioHeader(file: TFile): Promise<boolean> {
-    try {
-      const data = await this.app.vault.readBinary(file);
-      const bytes = new Uint8Array(data, 0, 12);
-      const header = String.fromCharCode(...bytes);
-      // MP4/M4A container: a size field followed by "ftyp" at offset 4
-      if (header.substring(4, 8) === 'ftyp') {
-        return true;
-      }
-      // MP3 with an ID3 tag, or a raw MPEG frame sync (0xFF 0xEx)
-      if (header.startsWith('ID3')) {
-        return true;
-      }
-      if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) {
-        return true;
-      }
-      return false;
-    } catch {
-      return false;
-    }
-  }
+		if (failures.length > 0) {
+			new Notice(`Transcribed ${transcribed} of ${audioLinks.length}. Failed: ${failures.join(' | ')}`, NOTICE_FINAL_MS);
+		}
+	}
 
-  async getTranscript(audioData: Uint8Array, extension: string): Promise<string> {
-    try {
-      new Notice('Transcribing audio...'); // Notify user of transcription start
-      const ai = new GoogleGenAI({ apiKey: this.settings.apiKey });
+	extractAudioLinks(content: string): string[] {
+		const regex = /!?\[\[([^\]]+)\]\]/g; // Updated regex to find [[link]] or ![[link]]
+		const links: string[] = [];
+		let match;
 
-      const audioPart = {
-        inlineData: {
-          mimeType: `audio/${extension === 'm4a' ? 'mp4' : extension}`, // Use mp4 for m4a files
-          data: uint8ArrayToBase64(audioData),
-        },
-      };
+		const audioExtensions = ['.m4a', '.mp3', '.mp4']; // Supported audio file extensions
 
-      this.debug('Sending audio to Gemini', { model: GEMINI_MODEL_ID, mimeType: audioPart.inlineData.mimeType });
-      const result = await ai.models.generateContent({
-        model: GEMINI_MODEL_ID,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: 'Return the transcript of this file without timestamps and separated into neat paragraphs, Return only the transcript itself' },
-              audioPart,
-            ],
-          },
-        ],
-      });
-      const transcript = result.text ?? '';
-      this.debug('Transcript received', { length: transcript.length });
-      return transcript;
-    } catch (error) {
-      new Notice(`Transcription error: ${error.message}`);
-      throw error;
-    }
-  }
+		while ((match = regex.exec(content)) !== null) {
+			const filename = match[1];
 
-  async generateDescriptiveTitle(transcript: string): Promise<string> {
-    if (!this.settings.apiKey) {
-      console.warn('API key not set, cannot generate descriptive title.');
-      return ''; // Return empty if no API key
-    }
-    if (!transcript || transcript.trim().length === 0) {
-      return ''; // Return empty if no transcript
-    }
 
-    try {
-      new Notice('Generating descriptive title for transcript...', 3000); // Short notice
-      const ai = new GoogleGenAI({ apiKey: this.settings.apiKey });
-      this.debug('Generating title', { model: GEMINI_MODEL_ID, transcriptLength: transcript.length });
+			for (const ext of audioExtensions) {
+				if (filename.toLowerCase().endsWith(ext)) {
+					links.push(filename);
+					break; // Stop checking other extensions once a match is found
+				}
+			}
+		}
+		return links;
+	}
 
-      // Prompt Gemini to create a short title.
-      // Sending only the beginning of the transcript to save tokens and time if it's very long.
-      const transcriptSnippet = transcript.length > 1500 ? transcript.substring(0, 1500) + "..." : transcript;
-      const prompt = `Based on the following transcript, provide a very short, descriptive title (around 3-7 words) suitable for a heading. Do not use quotes in the title. Transcript snippet:\n\n"${transcriptSnippet}"`;
+	async findAudioFile(link: string, activeFile: TFile | null): Promise<TFile | null> {
+		// Try direct path first
+		const abstractFile = this.app.vault.getAbstractFileByPath(link);
+		if (abstractFile instanceof TFile) {
+			return abstractFile;
+		}
 
-      const result = await ai.models.generateContent({
-        model: GEMINI_MODEL_ID,
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      });
-      let title = (result.text ?? '').trim();
-      
-      // Basic cleanup: remove potential quotes and leading/trailing "Title:" or similar artifacts.
-      title = title.replace(/^Title:\s*/i, '').replace(/["']/g, '');
-      
-      return title;
-    } catch (error) {
-      new Notice(`Error generating descriptive title: ${error.message}`, 5000);
-      console.error("Error generating descriptive title:", error);
-      return ''; // Fallback to empty on error
-    }
-  }
+		// Fallback: search vault recursively by basename
+		const basename = link.split('/').pop() || link; // Get filename without path
+		const candidates = this.findFilesByName(basename);
+		if (candidates.length === 0) {
+			return null;
+		}
 
-  async appendTranscript(file: TFile, link: string, transcript: string) {
-    let currentFileContent = await this.app.vault.read(file);
-    const basename = link.split('/').pop() || link; // Original filename for the audio link embed in the new section
+		// Prefer a file in the same folder as the active note, matching how
+		// Obsidian resolves [[links]] relative to the note.
+		if (activeFile && activeFile.parent) {
+			const sameFolder = candidates.find((file) => file.parent?.path === activeFile.parent?.path);
+			if (sameFolder) {
+				new Notice(`Found ${basename} at ${sameFolder.path}`);
+				return sameFolder;
+			}
+		}
 
-    // Generate the descriptive title from the transcript content
-    const descriptiveTitle = await this.generateDescriptiveTitle(transcript);
+		// When multiple files share a basename, skip candidates whose content
+		// does not match an audio container (corrupt/encrypted files). Sending
+		// non-audio bytes with an audio mime type makes the API reject the
+		// request with INVALID_ARGUMENT.
+		for (const candidate of candidates) {
+			if (await this.hasValidAudioHeader(candidate)) {
+				new Notice(`Found ${basename} at ${candidate.path}`);
+				return candidate;
+			}
+		}
 
-    // Determine the header text
-    const headerText = descriptiveTitle ? `Transcript about ${descriptiveTitle}` : `Transcript for ${basename}`;
-    
-    // Format for the audio file link (as an embed) in the new transcript section
-    const audioFileEmbedInNewSection = `![[${basename}]]`;
+		// No candidate has a recognizable audio header; let the API decide.
+		new Notice(`Found ${basename} at ${candidates[0].path}`);
+		return candidates[0];
+	}
 
-    // Construct the new transcript section to be appended
-    const newTranscriptSection = `\n\n# ${headerText}\n${audioFileEmbedInNewSection}\n\n${transcript}`;
-    
-    // Define the markdown for the original link to be removed.
-    // 'link' is the exact string extracted from between the brackets by extractAudioLinks.
-    const originalNonEmbedLinkMarkdown = `[[${link}]]`;
-    const originalEmbedLinkMarkdown = `![[${link}]]`;
+	findFilesByName(filename: string): TFile[] {
+		return this.app.vault.getFiles().filter(
+			(file) => file.name.toLowerCase() === filename.toLowerCase()
+		);
+	}
 
-    // Remove the original link from the current file content.
-    // Try removing the embed version first, then the non-embed version.
-    // This replaces only the first occurrence found during this specific call.
-    let contentAfterRemoval = currentFileContent;
-    if (contentAfterRemoval.includes(originalEmbedLinkMarkdown)) {
-        contentAfterRemoval = contentAfterRemoval.replace(originalEmbedLinkMarkdown, '');
-    } else if (contentAfterRemoval.includes(originalNonEmbedLinkMarkdown)) {
-        contentAfterRemoval = contentAfterRemoval.replace(originalNonEmbedLinkMarkdown, '');
-    }
-    
-    // Append the new transcript section to the modified content
-    const finalContent = contentAfterRemoval + newTranscriptSection;
-    
-    await this.app.vault.modify(file, finalContent);
-    new Notice(`Transcript added for ${basename}`);
-  }
+	async hasValidAudioHeader(file: TFile): Promise<boolean> {
+		try {
+			const data = await this.app.vault.readBinary(file);
+			const bytes = new Uint8Array(data, 0, 12);
+			const header = String.fromCharCode(...bytes);
+			// MP4/M4A container: a size field followed by "ftyp" at offset 4
+			if (header.substring(4, 8) === 'ftyp') {
+				return true;
+			}
+			// MP3 with an ID3 tag, or a raw MPEG frame sync (0xFF 0xEx)
+			if (header.startsWith('ID3')) {
+				return true;
+			}
+			if (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) {
+				return true;
+			}
+			return false;
+		} catch {
+			return false;
+		}
+	}
 
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-  }
+	async getTranscript(audioData: Uint8Array, extension: string, label: string): Promise<string> {
+		const mimeType = `audio/${extension === 'm4a' ? 'mp4' : extension}`; // Use mp4 for m4a files
+		const client = new GeminiClient(this.settings.apiKey);
+		const status: StatusReporter = {
+			info: (message: string) => {
+				this.debug(message);
+				new Notice(message, NOTICE_INFO_MS);
+			},
+			final: (message: string) => {
+				this.debug(message);
+				new Notice(message, NOTICE_FINAL_MS);
+			},
+		};
 
-  async saveSettings() {
-    await this.saveData(this.settings);
-  }
+		new Notice(`Transcribing ${label}...`, NOTICE_INFO_MS);
+		this.debug('Sending audio to Gemini', { label, mimeType, bytes: audioData.length });
 
-  private debug(message: string, data?: unknown) {
-    if (data === undefined) {
-      console.debug(`[transcribe-gemini] ${message}`);
-      return;
-    }
-    console.debug(`[transcribe-gemini] ${message}`, data);
-  }
+		const result = await client.transcribe({ mimeType, data: uint8ArrayToBase64(audioData) }, status);
+		this.debug('Transcript received', {
+			label,
+			model: result.model,
+			length: result.text.length,
+			failedAttempts: result.failedAttempts,
+		});
+
+		if (result.text.trim().length === 0) {
+			throw new Error(`${result.model} returned an empty transcript`);
+		}
+		return result.text;
+	}
+
+	async generateDescriptiveTitle(transcript: string): Promise<string> {
+		if (!this.settings.apiKey) {
+			console.warn('API key not set, cannot generate descriptive title.');
+			return ''; // Return empty if no API key
+		}
+		if (!transcript || transcript.trim().length === 0) {
+			return ''; // Return empty if no transcript
+		}
+
+		// A missing title only costs a generic heading, so failures stay quiet
+		// apart from a console warning.
+		const quiet: StatusReporter = {
+			info: (message: string) => this.debug(message),
+			final: (message: string) => this.debug(message),
+		};
+
+		try {
+			const client = new GeminiClient(this.settings.apiKey);
+			this.debug('Generating title', { transcriptLength: transcript.length });
+			return await client.title(transcript, quiet);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			console.warn('[transcribe-gemini] descriptive title failed:', reason);
+			return ''; // Fallback to empty on error
+		}
+	}
+
+	async appendTranscript(file: TFile, link: string, transcript: string) {
+		let currentFileContent = await this.app.vault.read(file);
+		const basename = link.split('/').pop() || link; // Original filename for the audio link embed in the new section
+
+		// Generate the descriptive title from the transcript content
+		const descriptiveTitle = await this.generateDescriptiveTitle(transcript);
+
+		// Determine the header text
+		const headerText = descriptiveTitle ? `Transcript about ${descriptiveTitle}` : `Transcript for ${basename}`;
+
+		// Format for the audio file link (as an embed) in the new transcript section
+		const audioFileEmbedInNewSection = `![[${basename}]]`;
+
+		// Construct the new transcript section to be appended
+		const newTranscriptSection = `\n\n# ${headerText}\n${audioFileEmbedInNewSection}\n\n${transcript}`;
+
+		// Define the markdown for the original link to be removed.
+		// 'link' is the exact string extracted from between the brackets by extractAudioLinks.
+		const originalNonEmbedLinkMarkdown = `[[${link}]]`;
+		const originalEmbedLinkMarkdown = `![[${link}]]`;
+
+		// Remove the original link from the current file content.
+		// Try removing the embed version first, then the non-embed version.
+		// This replaces only the first occurrence found during this specific call.
+		let contentAfterRemoval = currentFileContent;
+		if (contentAfterRemoval.includes(originalEmbedLinkMarkdown)) {
+			contentAfterRemoval = contentAfterRemoval.replace(originalEmbedLinkMarkdown, '');
+		} else if (contentAfterRemoval.includes(originalNonEmbedLinkMarkdown)) {
+			contentAfterRemoval = contentAfterRemoval.replace(originalNonEmbedLinkMarkdown, '');
+		}
+		// The removed link leaves a hole; close it so the heading does not start
+		// after a run of blank lines.
+		const finalContent = contentAfterRemoval.replace(/\s+$/, '') + newTranscriptSection;
+
+		await this.app.vault.modify(file, finalContent);
+		new Notice(`Transcript added for ${basename}`);
+	}
+
+	async loadSettings() {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	}
+
+	async saveSettings() {
+		await this.saveData(this.settings);
+	}
+
+	private debug(message: string, data?: unknown) {
+		if (data === undefined) {
+			console.debug(`[transcribe-gemini] ${message}`);
+			return;
+		}
+		console.debug(`[transcribe-gemini] ${message}`, data);
+	}
 }
 
 /**
@@ -278,38 +294,38 @@ export default class MyPlugin extends Plugin {
  * concatenating one character at a time for large audio files.
  */
 function uint8ArrayToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
+	let binary = '';
+	const chunkSize = 0x8000;
+	for (let i = 0; i < bytes.length; i += chunkSize) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+	}
+	return btoa(binary);
 }
 
 class SettingTab extends PluginSettingTab {
-  plugin: MyPlugin;
+	plugin: MyPlugin;
 
-  constructor(app: App, plugin: MyPlugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-  }
+	constructor(app: App, plugin: MyPlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
 
-  display(): void {
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.createEl('h2', { text: 'Audio Transcription Settings' });
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+		containerEl.createEl('h2', { text: 'Audio Transcription Settings' });
 
-    new Setting(containerEl)
-      .setName('Gemini API Key')
-      .setDesc('Enter your Gemini API key from Google AI Studio')
-      .addText((text) =>
-        text
-          .setPlaceholder('Enter API key')
-          .setValue(this.plugin.settings.apiKey)
-          .onChange(async (value) => {
-            this.plugin.settings.apiKey = value;
-            await this.plugin.saveSettings();
-          })
-      );
-  }
+		new Setting(containerEl)
+			.setName('Gemini API Key')
+			.setDesc('Enter your Gemini API key from Google AI Studio')
+			.addText((text) =>
+				text
+					.setPlaceholder('Enter API key')
+					.setValue(this.plugin.settings.apiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.apiKey = value;
+						await this.plugin.saveSettings();
+					})
+			);
+	}
 }

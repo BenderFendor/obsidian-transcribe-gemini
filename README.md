@@ -1,12 +1,12 @@
 # Transcribe Gemini Plugin
 
-Transcribe Gemini is an Obsidian plugin that automatically transcribes audio files linked within your notes. Powered by Google’s Gemini generative AI model, this plugin converts supported audio files (currently `.m4a`) into text transcripts and appends them to your notes. It uses the `gemini-3.6-flash` model.
+Transcribe Gemini is an Obsidian plugin that automatically transcribes audio files linked within your notes. Powered by Google’s Gemini generative AI model, this plugin converts supported audio files (currently `.m4a`, `.mp3`, `.mp4`) into text transcripts and appends them to your notes. It transcribes with `gemini-3.6-flash`, retrying and falling back to `gemini-3.8-flash` and `gemini-3.5-flash` when a model is at capacity.
 
 ## Key Features
 
 - **Automatic Transcription:** Finds and transcribes linked audio files in your notes.
 - **Seamless Integration:** Works within Obsidian’s interface, appending transcripts directly to your active file.
-- **Easy Configuration:** Set your Gemini API key in the plugin settings.
+- **Reliable Transcription:** Retries busy models with a backoff, falls back to other Flash models, and tells you which model produced the transcript.
 - **Built with TypeScript:** Enjoy type checking and in-editor documentation.
 
 ## Getting Started
@@ -54,6 +54,17 @@ Transcribe Gemini is an Obsidian plugin that automatically transcribes audio fil
   - The plugin checks the active note for linked audio.
   - It locates the audio files in your vault.
   - It sends the audio content for transcription and appends the transcript directly in your note.
+
+
+## Failure Handling
+
+Gemini answers a request either with a transcript or with a verdict. This plugin treats the two differently:
+
+- **Busy models are retried.** A capacity block (`503`), rate limit (`429`), server error (`5xx`) or dropped connection is retried up to 3 times per model with a 2s then 6s backoff.
+- **Dead ends are not retried.** An invalid request (`400`), a bad key (`401`/`403`) or an unknown model (`404`) fails on the first attempt, because repeating it on another model only wastes time.
+- **Other models are tried next.** After a model exhausts its retries, the request moves to the next Flash model in `FALLBACK_MODELS` in `gemini.ts`.
+- **Every step is reported.** Each retry, fallback, success and failure is a notice naming the model and the reason, and each file ends with its own success or failure notice.
+- **One bad file does not stop the rest.** Files are transcribed independently; the run finishes with a summary of what failed and why.
 
 ## Releasing New Versions
 
